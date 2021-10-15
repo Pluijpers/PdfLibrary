@@ -1,2 +1,2 @@
 # PdfLibrary
-Pdf manipulation library using iTextSharp
+Pdf manipulation library using iText
