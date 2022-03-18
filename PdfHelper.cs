@@ -1,6 +1,6 @@
 // --------------------------------------------------------------------------------------------------------------------
 // File Name: PdfHelper.cs
-// Last Updated: 2020-10-13 @ 2:45 PM
+// Last Updated: 2022-03-09 @ 12:40 PM
 // --------------------------------------------------------------------------------------------------------------------
 
 namespace App.Helpers
@@ -10,6 +10,7 @@ namespace App.Helpers
     using System.Drawing;
     using System.Drawing.Imaging;
     using System.IO;
+    using System.Linq;
     using System.Text;
     using iText.Forms;
     using iText.IO.Image;
@@ -35,6 +36,16 @@ namespace App.Helpers
 
         #endregion
         #region Public Methods and Operators
+
+        public static int GetPageCount(byte[] sourceContent)
+        {
+            CheckByteContent(sourceContent, "sourceContent");
+
+            var pdfReader = new PdfReader(new MemoryStream(sourceContent)).SetUnethicalReading(true);
+            var pdfDocument = new PdfDocument(pdfReader);
+            return pdfDocument.GetNumberOfPages();
+        }
+
 
         public static byte[] AddDiagonalTextStamp(byte[] sourceContent, string stampText, bool eachPage = false)
         {
@@ -129,7 +140,7 @@ namespace App.Helpers
                 {
                     var pdfPage = pdfDocument.GetPage(page);
                     var pdfPageSize = pdfPage.GetPageSize();
-                    var paragraph = new Paragraph(stampText.Substring(0, stampText.Length > MaxUpperCaseTextLength ? MaxUpperCaseTextLength : stampText.Length).ToUpper()).SetFontSize(12).SetFontColor(ColorConstants.RED).SetBold().SetTextAlignment(TextAlignment.LEFT).SetOpacity(0.4f);
+                    var paragraph = new Paragraph(stampText.Substring(0, stampText.Length > MaxUpperCaseTextLength ? MaxUpperCaseTextLength : stampText.Length)).SetFontSize(12).SetFontColor(ColorConstants.RED).SetBold().SetTextAlignment(TextAlignment.LEFT).SetOpacity(0.4f);
                     paragraph.SetFixedPosition(page, pdfPageSize.GetLeft() + DefaultMargin, pdfPageSize.GetHeight() - 20, pdfPageSize.GetWidth());
                     document.Add(paragraph);
                 }
@@ -181,16 +192,147 @@ namespace App.Helpers
             return content;
         }
 
+        public static byte[] ExtractPages(byte[] sourceContent, int startPage, int endPage)
+        {
+            CheckByteContent(sourceContent, "sourceContent");
+
+            var pageList = new List<int>();
+            for (var i = endPage; i > startPage; i--)
+            {
+                pageList.Add(i);
+            }
+            var pages = pageList.ToArray();
+            return ExtractPages(sourceContent, pages);
+        }
+
+        public static List<byte[]> ExtractPagesIntoPdf(byte[] sourceContent, int[] pages)
+        {
+            CheckByteContent(sourceContent, "sourceContent");
+
+            var collection = new List<byte[]>();
+
+            var pdfReader = new PdfReader(new MemoryStream(sourceContent)).SetUnethicalReading(true);
+            var pdfSourceDocument = new PdfDocument(pdfReader);
+
+            for (var page = 1; page <= pdfSourceDocument.GetNumberOfPages(); page++)
+            {
+                if (!pages.Contains(page))
+                {
+                    continue;
+                }
+
+                using (var ms = new MemoryStream())
+                {
+                    var pdfWriter = new PdfWriter(ms, new WriterProperties().SetPdfVersion(PdfVersion.PDF_1_7));
+                    var pdfTargetDocument = new PdfDocument(pdfWriter);
+
+                    pdfSourceDocument.CopyPagesTo(page, page, pdfTargetDocument);
+
+                    pdfTargetDocument.Close();
+                    pdfWriter.Close();
+
+                    collection.Add(ms.ToArray());
+                }
+
+            }
+
+            return collection;
+        }
+
+
         public static byte[] ExtractPages(byte[] sourceContent, int[] pages)
         {
             CheckByteContent(sourceContent, "sourceContent");
-            throw new NotImplementedException();
+            byte[] content;
+
+            using (var ms = new MemoryStream())
+            {
+                var pdfReader = new PdfReader(new MemoryStream(sourceContent)).SetUnethicalReading(true);
+                var pdfWriter = new PdfWriter(ms, new WriterProperties().SetPdfVersion(PdfVersion.PDF_1_7));
+                var pdfSourceDocument = new PdfDocument(pdfReader);
+                var pdfTargetDocument = new PdfDocument(pdfWriter);
+
+                for (var page = 1; page <= pdfSourceDocument.GetNumberOfPages(); page++)
+                {
+                    if (pages.Contains(page))
+                    {
+                        pdfSourceDocument.CopyPagesTo(page, page, pdfTargetDocument);
+                    }
+                }
+
+                pdfSourceDocument.Close();
+                pdfReader.Close();
+                pdfTargetDocument.Close();
+                pdfWriter.Close();
+
+                content = ms.ToArray();
+            }
+
+            return content;
         }
 
-        public static Dictionary<int, string> FindMergeTags(byte[] sourceContent, string startTag, string endTag)
+        public static List<MergeTag> FindMergeTags(byte[] sourceContent, string startTag, string endTag)
         {
             CheckByteContent(sourceContent, "sourceContent");
-            throw new NotImplementedException();
+            var collection = new Dictionary<int, string>();
+
+            var pdfReader = new PdfReader(new MemoryStream(sourceContent)).SetUnethicalReading(true);
+            var pdfDocument = new PdfDocument(pdfReader);
+
+            for (var page = 1; page <= pdfDocument.GetNumberOfPages(); page++)
+            {
+                var tag = string.Empty;
+                ITextExtractionStrategy strategy = new SimpleTextExtractionStrategy();
+
+                var currentPageText = PdfTextExtractor.GetTextFromPage(pdfDocument.GetPage(page), strategy);
+
+                // Only parse the text when both start and end tag are found.
+                if (currentPageText.Contains(startTag) && currentPageText.Contains(endTag))
+                {
+                    var startTagIndex = currentPageText.IndexOf(startTag, StringComparison.OrdinalIgnoreCase);
+                    var endTagIndex = currentPageText.IndexOf(endTag, startTagIndex, StringComparison.OrdinalIgnoreCase);
+
+                    // End tag must come after start tag
+                    if (startTagIndex + startTag.Length < endTagIndex)
+                    {
+                        tag = currentPageText.Substring(startTagIndex + startTag.Length, endTagIndex - startTag.Length).Trim();
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(tag))
+                    {
+                        collection.Add(page, tag);
+                    }
+                }
+            }
+
+            pdfDocument.Close();
+            pdfReader.Close();
+
+            // Group Tags.
+            var mergeTags = new List<MergeTag>();
+            var distinctTags = collection.Select(x => x.Value).Distinct().OrderBy(x => x);
+            foreach (var distinctTag in distinctTags)
+            {
+                var selectedTag = collection.Where(x => x.Value == distinctTag);
+
+                foreach (var tag in selectedTag.OrderBy(x => x.Key))
+                {
+                    var mergeTag = mergeTags.FirstOrDefault(t => t.Tag == distinctTag);
+
+                    if (mergeTag == null)
+                    {
+                        mergeTag = new MergeTag { Tag = distinctTag };
+                        mergeTag.OnPages.Add(tag.Key);
+                        mergeTags.Add(mergeTag);
+                    }
+                    else
+                    {
+                        mergeTag.OnPages.Add(tag.Key);
+                    }
+                }
+            }
+
+            return mergeTags;
         }
 
         public static byte[] FlattenFormPdf(byte[] sourceContent)
@@ -231,15 +373,10 @@ namespace App.Helpers
                     using (var ms = new MemoryStream())
                     {
                         if (path.EndsWith(".gif", StringComparison.CurrentCultureIgnoreCase)) { stampImage.Save(ms, ImageFormat.Gif); }
-
                         if (path.EndsWith(".bmp", StringComparison.CurrentCultureIgnoreCase)) { stampImage.Save(ms, ImageFormat.Bmp); }
-
                         if (path.EndsWith(".png", StringComparison.CurrentCultureIgnoreCase)) { stampImage.Save(ms, ImageFormat.Bmp); }
-
                         if (path.EndsWith(".jpg", StringComparison.CurrentCultureIgnoreCase)) { stampImage.Save(ms, ImageFormat.Jpeg); }
-
                         if (path.EndsWith(".jpeg", StringComparison.CurrentCultureIgnoreCase)) { stampImage.Save(ms, ImageFormat.Jpeg); }
-
                         content = ms.ToArray();
                     }
                 }
@@ -351,7 +488,7 @@ namespace App.Helpers
                     case 0:
                         {
                             // First and Last page for this section.
-                            if (pagesPerDocument==1)
+                            if (pagesPerDocument == 1)
                             {
                                 ms = new MemoryStream();
                                 pdfWriter = new PdfWriter(ms, new WriterProperties().SetPdfVersion(PdfVersion.PDF_1_7));
@@ -393,6 +530,55 @@ namespace App.Helpers
             return sections;
         }
 
+        public static byte[] WritePdf(byte[] sourceContent)
+        {
+            CheckByteContent(sourceContent, "sourceContent");
+
+            try
+            {
+                using (var memoryStream = new MemoryStream())
+                {
+                    var pdfWriter = new PdfWriter(memoryStream, new WriterProperties().SetPdfVersion(PdfVersion.PDF_1_7));
+                    var pdfReader = new PdfReader(new MemoryStream(sourceContent)).SetUnethicalReading(true);
+                    var pdfDocument = new PdfDocument(pdfReader, pdfWriter);
+
+                    using (var document = new Document(pdfDocument)) { }
+
+                    pdfDocument.Close();
+
+                    return memoryStream.ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Exception occurred in {ex.TargetSite.Name}.", ex);
+            }
+        }
+
+        public static bool WritePdf(List<byte[]> sourceContents, string path)
+        {
+            // Check parameters.
+            CheckFilePath(path);
+
+            try
+            {
+                var appendPdf = WritePdf(sourceContents[0]);
+                if (sourceContents.Count > 1)
+                {
+                    for (var pdf = 1; pdf < sourceContents.Count; pdf++)
+                    {
+                        appendPdf = AppendPdf(appendPdf, sourceContents[pdf]);
+                    }
+                }
+
+                return WritePdf(appendPdf, path);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Exception occurred in {ex.TargetSite.Name}.", ex);
+            }
+        }
+
         public static bool WritePdf(byte[] sourceContent, string path)
         {
             CheckByteContent(sourceContent, "sourceContent");
@@ -415,6 +601,42 @@ namespace App.Helpers
             {
                 throw new Exception($"Exception occurred in {ex.TargetSite.Name}.", ex);
             }
+        }
+
+        public static byte[] ProtectPdf(byte[] sourceContent, string password = "")
+        {
+            CheckByteContent(sourceContent, "sourceContent");
+
+            try
+            {
+                byte[] ownerPassword = null;
+                if (string.IsNullOrEmpty(password))
+                {
+                    ownerPassword = Guid.NewGuid().ToByteArray();
+                }
+                else
+                {
+                    ownerPassword = Encoding.ASCII.GetBytes(password);
+                }
+
+                using (var memoryStream = new MemoryStream())
+                {
+                    var pdfWriter = new PdfWriter(memoryStream, new WriterProperties().SetPdfVersion(PdfVersion.PDF_1_7).SetStandardEncryption(null, ownerPassword, EncryptionConstants.ALLOW_PRINTING, EncryptionConstants.ENCRYPTION_AES_256 | EncryptionConstants.DO_NOT_ENCRYPT_METADATA));
+                    var pdfReader = new PdfReader(new MemoryStream(sourceContent)).SetUnethicalReading(true);
+                    var pdfDocument = new PdfDocument(pdfReader, pdfWriter);
+
+                    using (var document = new Document(pdfDocument)) { }
+
+                    pdfDocument.Close();
+
+                    return memoryStream.ToArray();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Exception occurred in {ex.TargetSite.Name}.", ex);
+            }
+
         }
 
         public static bool WriteProtectPdf(byte[] sourceContent, string path)
@@ -512,6 +734,12 @@ namespace App.Helpers
             }
 
             #endregion
+        }
+
+        public sealed class MergeTag
+        {
+            public string Tag { get; set; } = string.Empty;
+            public List<int> OnPages { get; set; } = new List<int>();
         }
     }
 }
